@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Night Rider · NovaBytes</title>
+<style>
+  :root { --bg:#0f0c29; --pink:#ff3d9a; --cyan:#27e8ff; --violet:#a78bfa; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; background:var(--bg); overflow:hidden; font-family:"Trebuchet MS","Segoe UI",sans-serif; color:#fff; touch-action:none; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  .hud { position:fixed; top:14px; left:0; right:0; display:flex; justify-content:space-between; padding:0 20px; font-size:20px; font-weight:700; letter-spacing:.06em; text-shadow:0 0 12px var(--cyan); pointer-events:none; }
+  .hud small { display:block; font-size:11px; opacity:.7; font-weight:400; }
+  .panel { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; text-align:center; background:rgba(15,12,41,.72); backdrop-filter:blur(4px); }
+  .panel.hide { display:none; }
+  h1 { font-size:clamp(40px,10vw,84px); font-style:italic; font-weight:900; line-height:.95; text-shadow:0 0 18px var(--pink),0 0 42px var(--pink); }
+  h1 span { color:var(--cyan); text-shadow:0 0 18px var(--cyan),0 0 42px var(--cyan); }
+  p { opacity:.8; max-width:30ch; line-height:1.4; }
+  button { font:inherit; font-weight:800; font-size:18px; color:#0f0c29; background:var(--cyan); border:0; padding:14px 34px; border-radius:999px; cursor:pointer; box-shadow:0 0 24px var(--cyan); }
+  button:hover,button:focus-visible { outline:3px solid #fff; transform:scale(1.04); }
+  .best { color:var(--violet); font-weight:700; }
+  @media (prefers-reduced-motion:reduce){ button:hover{transform:none} }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Endless bike traffic dodging game"></canvas>
+<div class="hud"><div><small>SCORE</small><span id="score">0</span></div><div><small>SPEED</small><span id="speed">0</span> km/h</div><div><small>BEST</small><span id="best">0</span></div></div>
+
+<div class="panel" id="menu">
+  <h1>NIGHT<br><span>RIDER</span></h1>
+  <p>Weave through traffic. Don't crash. It only gets faster.</p>
+  <p>← → or A D to steer, or tap the left/right side of the screen.</p>
+  <button id="go">Ride</button>
+  <div class="best" id="menuBest"></div>
+</div>
+<div class="panel hide" id="over">
+  <h1>WIPED<br><span>OUT</span></h1>
+  <p id="final"></p>
+  <button id="again">Ride again</button>
+</div>
+
+<script>
+const cv = document.getElementById('c'), g = cv.getContext('2d');
+let W, H;
+function resize(){ const d = Math.min(devicePixelRatio||1,2); W = cv.width = innerWidth*d; H = cv.height = innerHeight*d; }
+addEventListener('resize', resize); resize();
+
+const $ = id => document.getElementById(id);
+let best = 0; try { best = +localStorage.getItem('nr_best')||0 } catch(e){}
+$('best').textContent = best; $('menuBest').textContent = best ? 'Best: '+best : '';
+
+// Road: pseudo-3D. z=0 is the camera plane, depth runs to FAR.
+const FAR = 60, LANES = 4, ROAD_W = 2.4;      // road half-width in world units
+let state = 'menu', px, vx, speed, dist, score, cars, spawnT, shake, lean;
+const keys = {};
+
+function reset(){
+  px = 0; vx = 0; speed = 22; dist = 0; score = 0; cars = []; spawnT = 0; shake = 0; lean = 0;
+}
+// project world (x,z) → screen. horizon at 38% height.
+function proj(x, z){
+  const hz = H*0.38, s = 1/(1 + z*0.16);
+  return { x: W/2 + x*s*(W*0.19) + curve(z)*s*W, y: hz + (H*0.93 - hz)*s, s };
+}
+function curve(z){ return Math.sin(dist*0.0009 + z*0.05) * z*z*0.00012 * 6; }
+
+function laneX(i){ return (i - (LANES-1)/2) * (ROAD_W*2/LANES); }
+function spawn(){
+  const free = [...Array(LANES).keys()];
+  const n = Math.random() < Math.min(0.15 + dist/60000, 0.5) ? 2 : 1;
+  for(let k=0;k<n;k++){
+    const li = free.splice(Math.floor(Math.random()*free.length),1)[0];
+    cars.push({ x: laneX(li), z: FAR, v: 6 + Math.random()*8, type: Math.random()<.25?'truck':'car',
+                hue: [330,185,265,45][Math.floor(Math.random()*4)] });
+  }
+}
+
+function drawCar(c){
+  const p = proj(c.x, c.z); if(p.s < 0.03) return;
+  const w = (c.type==='truck'?0.62:0.5)*p.s*W*0.19, h = (c.type==='truck'?0.55:0.34)*p.s*W*0.19;
+  const x = p.x - w/2, y = p.y - h;
+  g.save(); g.shadowColor = `hsl(${c.hue} 100% 60%)`; g.shadowBlur = 18*p.s;
+  g.fillStyle = `hsl(${c.hue} 70% 18%)`; g.fillRect(x, y, w, h);
+  g.fillStyle = `hsl(${c.hue} 90% 55%)`; g.fillRect(x, y, w, h*0.08);       // roof edge
+  g.fillStyle = '#0a0820'; g.fillRect(x+w*0.12, y+h*0.14, w*0.76, h*0.32);  // rear window
+  g.fillStyle = '#ff2a4d'; g.shadowColor = '#ff2a4d'; g.shadowBlur = 22*p.s;
+  g.fillRect(x+w*0.05, y+h*0.62, w*0.24, h*0.14); g.fillRect(x+w*0.71, y+h*0.62, w*0.24, h*0.14);
+  g.restore();
+}
+
+function drawBike(){
+  const p = proj(px, 1.2), u = p.s*W*0.19, x = p.x, y = p.y;
+  g.save(); g.translate(x, y); g.rotate(lean*0.25);
+  g.shadowColor = '#27e8ff'; g.shadowBlur = 24;
+  g.fillStyle = '#05041a'; g.strokeStyle = '#27e8ff'; g.lineWidth = Math.max(2, u*0.03);
+  // rear wheel
+  g.beginPath(); g.roundRect(-u*0.06, -u*0.34, u*0.12, u*0.34, u*0.04); g.fill(); g.stroke();
+  // body + tail
+  g.fillStyle = '#1a1250'; g.beginPath(); g.moveTo(-u*0.2,-u*0.32); g.lineTo(u*0.2,-u*0.32); g.lineTo(u*0.12,-u*0.62); g.lineTo(-u*0.12,-u*0.62); g.closePath(); g.fill(); g.stroke();
+  // rider
+  g.fillStyle = '#ff3d9a'; g.shadowColor = '#ff3d9a'; g.beginPath(); g.roundRect(-u*0.1,-u*0.88,u*0.2,u*0.32,u*0.06); g.fill();
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(0,-u*0.96,u*0.09,0,7); g.fill();
+  // tail light
+  g.fillStyle = '#ff2a4d'; g.shadowColor = '#ff2a4d'; g.fillRect(-u*0.06,-u*0.4,u*0.12,u*0.05);
+  g.restore();
+}
+
+function draw(t){
+  const hz = H*0.38;
+  // sky
+  let gr = g.createLinearGradient(0,0,0,hz);
+  gr.addColorStop(0,'#0f0c29'); gr.addColorStop(.6,'#302b63'); gr.addColorStop(1,'#ff3d9a');
+  g.fillStyle = gr; g.fillRect(0,0,W,hz);
+  // sun with stripes
+  const sr = Math.min(W,H)*0.17, sx = W/2 + curve(FAR)*W*0.1, sy = hz - sr*0.2;
+  g.save(); g.beginPath(); g.arc(sx,sy,sr,Math.PI,0); g.clip();
+  gr = g.createLinearGradient(0,sy-sr,0,sy); gr.addColorStop(0,'#ffe66d'); gr.addColorStop(1,'#ff3d9a');
+  g.fillStyle = gr; g.fillRect(sx-sr,sy-sr,sr*2,sr);
+  g.fillStyle = '#302b63'; for(let i=0;i<5;i++) g.fillRect(sx-sr, sy-sr*0.5 + i*sr*0.11, sr*2, i*sr*0.02+2);
+  g.restore();
+  // skyline
+  g.fillStyle = '#0a0820';
+  for(let i=0;i<24;i++){ const bw=W/24, bh=(Math.sin(i*7.3)*.5+.5)*H*0.09+H*0.02; g.fillRect(i*bw - (dist*0.02)%bw*0, hz-bh, bw-3, bh); }
+  // ground
+  g.fillStyle = '#0a0820'; g.fillRect(0,hz,W,H-hz);
+  // road strips (scrolling)
+  const STEP = 1.2, off = (dist*0.05) % (STEP*2);
+  for(let z=FAR; z>0; z-=STEP*0.5){
+    const z2 = z - STEP*0.5, a = proj(-ROAD_W,z), b = proj(ROAD_W,z), c = proj(ROAD_W,z2), d = proj(-ROAD_W,z2);
+    const band = Math.floor((z + off)/STEP)%2;
+    g.fillStyle = band ? '#16123a' : '#1d1850';
+    g.beginPath(); g.moveTo(a.x,a.y); g.lineTo(b.x,b.y); g.lineTo(c.x,c.y); g.lineTo(d.x,d.y); g.fill();
+  }
+  // edge neon + lane dashes
+  for(const sx of [-ROAD_W, ROAD_W]){
+    g.strokeStyle = sx<0 ? '#ff3d9a' : '#27e8ff'; g.shadowColor = g.strokeStyle; g.shadowBlur = 16; g.lineWidth = Math.max(2,W*0.004);
+    g.beginPath(); for(let z=FAR; z>=0.2; z-=1.5){ const p = proj(sx,z); z===FAR?g.moveTo(p.x,p.y):g.lineTo(p.x,p.y); } g.stroke();
+  }
+  g.shadowBlur = 0; g.strokeStyle = 'rgba(255,255,255,.55)';
+  for(let l=1;l<LANES;l++){
+    const lx = -ROAD_W + l*(ROAD_W*2/LANES);
+    for(let z=FAR; z>1; z-=STEP*2){
+      const zz = z - off, a = proj(lx,zz), b = proj(lx,zz-STEP*0.8); if(zz<0.2) continue;
+      g.lineWidth = Math.max(1,a.s*W*0.006); g.beginPath(); g.moveTo(a.x,a.y); g.lineTo(b.x,b.y); g.stroke();
+    }
+  }
+  // cars far→near, bike drawn in the middle depth
+  cars.sort((a,b)=>b.z-a.z);
+  let bikeDone = false;
+  for(const c of cars){ if(!bikeDone && c.z < 1.2){ drawBike(); bikeDone = true; } drawCar(c); }
+  if(!bikeDone) drawBike();
+  // speed lines
+  if(speed > 40){ g.strokeStyle = `rgba(167,139,250,${Math.min((speed-40)/60,.5)})`; g.lineWidth = 2;
+    for(let i=0;i<14;i++){ const xx = (i*97 + t*0.9*speed) % W, yy = H*0.45 + (i*53 % (H*0.5)); g.beginPath(); g.moveTo(xx,yy); g.lineTo(xx + (xx-W/2)*0.08, yy + 28); g.stroke(); } }
+}
+
+let last = 0;
+function loop(ts){
+  const dt = Math.min((ts-last)/1000 || 0, 0.05); last = ts;
+  if(state==='play'){
+    const steer = (keys.left?-1:0) + (keys.right?1:0);
+    vx += (steer*5 - vx) * Math.min(dt*9,1);
+    px = Math.max(-ROAD_W+0.3, Math.min(ROAD_W-0.3, px + vx*dt*0.6));
+    lean += (steer - lean) * Math.min(dt*10,1);
+    speed = Math.min(speed + dt*1.1, 95);
+    dist += speed*dt*10; score = Math.floor(dist/10);
+    spawnT -= dt*speed/22; if(spawnT<=0){ spawn(); spawnT = Math.max(0.35, 0.95 - dist/90000); }
+    for(const c of cars){
+      c.z -= (speed - c.v)*dt*0.28;
+      const hitX = c.type==='truck'?0.3:0.25;
+      if(c.z < 1.5 && c.z > 0.7 && Math.abs(c.x-px) < hitX+0.14){ crash(); }
+    }
+    cars = cars.filter(c => c.z > -2 && c.z <= FAR+1);
+    $('score').textContent = score; $('speed').textContent = Math.floor(speed*1.6);
+  }
+  g.save();
+  if(shake>0){ shake -= dt; g.translate((Math.random()-.5)*shake*60,(Math.random()-.5)*shake*60); }
+  draw(ts/1000);
+  g.restore();
+  requestAnimationFrame(loop);
+}
+
+function crash(){
+  state = 'over'; shake = 0.5;
+  if(score > best){ best = score; try{ localStorage.setItem('nr_best',best) }catch(e){} }
+  $('best').textContent = best;
+  $('final').textContent = `Score ${score}` + (score>=best && score>0 ? ' · new best!' : ` · best ${best}`);
+  setTimeout(()=>{ $('over').classList.remove('hide'); $('again').focus(); }, 600);
+}
+function start(){ reset(); state='play'; $('menu').classList.add('hide'); $('over').classList.add('hide'); }
+
+$('go').onclick = start; $('again').onclick = start;
+addEventListener('keydown', e=>{
+  if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A') keys.left = true;
+  if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') keys.right = true;
+});
+addEventListener('keyup', e=>{
+  if(e.key==='ArrowLeft'||e.key==='a'||e.key==='A') keys.left = false;
+  if(e.key==='ArrowRight'||e.key==='d'||e.key==='D') keys.right = false;
+});
+function touch(e){ keys.left = keys.right = false;
+  for(const t of e.touches){ (t.clientX < innerWidth/2 ? keys.left = true : keys.right = true); } }
+addEventListener('touchstart', touch, {passive:true}); addEventListener('touchmove', touch, {passive:true});
+addEventListener('touchend', touch, {passive:true});
+
+reset(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
